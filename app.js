@@ -547,13 +547,14 @@ function viewSettings() {
       <h2>Photo analysis</h2>
       <label class="field"><span>Free Google Gemini key</span>
         <input id="sGemini" type="password" autocomplete="off" value="${esc(s.geminiKey)}" placeholder="Paste the key here"></label>
+      <p id="keyStatus" class="status" role="status">${s.geminiKey ? "✓ Key saved on this phone." : "No key yet."}</p>
       <p class="small muted" style="margin-bottom:12px">Free, set up once: sign in at aistudio.google.com/apikey with a Google account, create a key and paste it here. Google may use photos sent on the free tier to improve its products.</p>
       <label class="field"><span>Model</span>
         <select id="sModel">${MODELS.map(([id, label]) => `<option value="${id}" ${id === s.model ? "selected" : ""}>${label}</option>`).join("")}</select></label>
       <label class="field"><span>Claude API key (optional, only for the paid models)</span>
         <input id="sKey" type="password" autocomplete="off" value="${esc(s.apiKey)}" placeholder="sk-ant-..."></label>
       <p class="small muted" style="margin-bottom:12px">Keys are stored only on this device and sent only to the service they belong to.</p>
-      ${s.geminiKey ? `<button class="btn" data-act="copySetup" style="width:100%">Copy setup link for another phone</button>` : ""}
+      <button class="btn" data-act="copySetup" style="width:100%">Copy setup link for another phone</button>
     </section>
     <section class="card">
       <h2>Daily goals</h2>
@@ -564,7 +565,7 @@ function viewSettings() {
         ${n("sFat", "Fat limit (g)", s.fatGoal)}
         ${n("sSugar", "Sugar limit (g)", s.sugarLimit)}
       </div>
-      <button class="btn primary" data-act="saveSettings" style="width:100%">Save settings</button>
+      <button class="btn primary" data-act="saveSettings" style="width:100%">Save goals</button>
     </section>
     <section class="card">
       <h2>Getting accurate numbers</h2>
@@ -834,6 +835,7 @@ const actions = {
     toast("Settings saved");
   },
   copySetup: async () => {
+    if (!state.settings.geminiKey) return toast("Paste the Google key first.");
     const link = `${location.origin}${location.pathname}#setup=${encodeURIComponent(state.settings.geminiKey)}`;
     try {
       await navigator.clipboard.writeText(link);
@@ -867,8 +869,43 @@ document.addEventListener("click", (e) => {
   if (el && actions[el.dataset.act]) actions[el.dataset.act](el);
 });
 
+// Checks a pasted Gemini key with one tiny request and reports the result under the field.
+let keyCheckTimer;
+async function checkGeminiKey() {
+  const key = state.settings.geminiKey;
+  const show = (text, cls = "") => {
+    const el = $("#keyStatus");
+    if (el && state.settings.geminiKey === key) { el.textContent = text; el.className = `status ${cls}`; }
+  };
+  if (!key) return show("No key yet.");
+  show("Key saved. Checking it with Google…");
+  try {
+    await geminiCall(key, FREE_MODELS.at(-1), [{ type: "text", text: "Reply with the word ok." }], false);
+    show("✓ Key saved and working. You can photograph a meal now.", "good");
+  } catch (err) {
+    if (err.badKey) show("✗ Google rejected this key. Copy it again from aistudio.google.com/apikey.", "bad");
+    else if (err.status) show("✓ Key saved. Google is busy right now, so it could not be checked, but it was accepted.", "good");
+    else show("Key saved. Could not reach Google to check it (no internet?).");
+  }
+}
+
 document.addEventListener("input", (e) => {
   const el = e.target;
+  // Settings fields that matter for analysis save as soon as they change.
+  if (el.id === "sGemini") {
+    state.settings.geminiKey = el.value.trim();
+    saveState();
+    clearTimeout(keyCheckTimer);
+    keyCheckTimer = setTimeout(checkGeminiKey, 700);
+    return;
+  }
+  if (el.id === "sKey" || el.id === "sModel") {
+    if (el.id === "sKey") state.settings.apiKey = el.value.trim();
+    else state.settings.model = el.value;
+    saveState();
+    toast("Saved");
+    return;
+  }
   if (!draft || !el.dataset.field) return;
   const i = Number(el.dataset.i);
   if (el.dataset.field === "name") draft.items[i].name = el.value;
