@@ -1,21 +1,30 @@
 // PlateLog: photograph a meal, let Claude estimate it, correct the portions, track the day.
-// Everything (meals, weights, settings, API key) stays in this browser's storage.
+// Photo analysis uses Google Gemini's free tier by default; Claude is an optional paid alternative.
+// Everything (meals, weights, settings, keys) stays in this browser's storage.
 
 const SDK_URL = "https://esm.sh/@anthropic-ai/sdk@1.8.0?bundle";
 const DEMO = new URLSearchParams(location.search).has("demo");
 
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
+// Free Gemini models, best first. If one is busy or over its free limit, the next is tried.
+const FREE_MODELS = ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
 const MODELS = [
-  ["claude-opus-5-5", "Claude Opus 5.5 (most accurate)"],
-  ["claude-sonnet-5-5", "Claude Sonnet 5.5 (cheaper)"],
-  ["claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"],
+  ["gemini-4-hydrogen", "Google Gemini 4 Hydrogen (free)"],
+  ["gemini-3.8-flash", "Google Gemini 3.8 Flash (free)"],
+  ["gemini-3.5-flash-lite", "Google Gemini 3.5 Flash-Lite (free, fastest)"],
+  ["claude-opus-5-5", "Claude Opus 5.5 (paid)"],
+  ["claude-sonnet-5-5", "Claude Sonnet 5.5 (paid)"],
+  ["claude-haiku-5-5", "Claude Haiku 5.5 (paid)"],
 ];
+const isGemini = (model) => model.startsWith("gemini");
 
 const NUTRIENTS = ["calories", "protein_g", "carbs_g", "sugar_g", "fat_g", "fiber_g", "calories_low", "calories_high"];
 
 const state = {
   settings: {
-    apiKey: "",
-    model: "claude-opus-5-5",
+    geminiKey: "", // free Google AI Studio key
+    apiKey: "",    // optional paid Claude key
+    model: "gemini-4-hydrogen",
     kcalGoal: 2000,
     proteinGoal: 75,
     carbGoal: 250,
@@ -57,6 +66,7 @@ async function loadState() {
 
 function applyState(saved) {
   Object.assign(state.settings, saved.settings || {});
+  if (!MODELS.some(([id]) => id === state.settings.model)) state.settings.model = "gemini-4-hydrogen";
   state.meals = Array.isArray(saved.meals) ? saved.meals : [];
   state.weights = Array.isArray(saved.weights) ? saved.weights : [];
 }
@@ -188,7 +198,113 @@ const SCHEMA = {
 
 async function analyze({ image, note, previous, correction }) {
   if (DEMO) return demoResult();
-  if (!state.settings.apiKey) throw new Error("Add your Claude API key in Settings first.");
+  const model = state.settings.model;
+
+  const text = [];
+  text.push(image ? "Estimate the nutrition of the food in this photo." : "Estimate the nutrition of the meal described below.");
+  if (note) text.push(`The person's note: ${note}`);
+  if (previous) {
+    text.push(`Your earlier estimate was:\n${JSON.stringify(previous)}`);
+    text.push(`The person's correction: ${correction}\nReturn the complete revised estimate.`);
+  }
+  const prompt = text.join("\n\n");
+  const data = image ? image.slice(image.indexOf(",") + 1) : "";
+
+  const out = isGemini(model) ? await askGemini(model, prompt, data) : await askClaude(model, prompt, data);
+  return parseEstimate(out);
+}
+
+function parseEstimate(out) {
+  try {
+    // Tolerate a code fence or stray words around the JSON object.
+    return JSON.parse(out.slice(out.indexOf("{"), out.lastIndexOf("}") + 1));
+  } catch {
+    throw new Error("The answer could not be read. Try again.");
+  }
+}
+
+// ---------- Google Gemini (free tier) ----------
+
+async function askGemini(model, prompt, imageData) {
+  const key = state.settings.geminiKey;
+  if (!key) throw new Error("Add the free Google Gemini key in Settings first.");
+
+  const input = [{ type: "text", text: prompt }];
+  if (imageData) input.push({ type: "image", data: imageData, mime_type: "image/jpeg" });
+
+  const order = [model, ...FREE_MODELS.filter((m) => m !== model)];
+  let lastError;
+  for (const m of order) {
+    try {
+      return await geminiCall(key, m, input, true);
+    } catch (err) {
+      lastError = err;
+      // A schema the server will not accept: ask again with the format described in words.
+      if (err.status === 400 && !err.badKey) {
+        try {
+          return await geminiCall(key, m, input, false);
+        } catch (err2) {
+          lastError = err2;
+        }
+      }
+      const tryNext = [404, 429, 500, 503].includes(lastError.status);
+      if (!tryNext) break;
+    }
+  }
+  if (lastError.status === 429) {
+    throw new Error("The free limit is used up for now. Wait a minute and try again; if it keeps happening, the daily limit is reached and resets tomorrow.");
+  }
+  throw lastError;
+}
+
+async function geminiCall(key, model, input, structured) {
+  const body = {
+    model,
+    input,
+    system_instruction: structured
+      ? SYSTEM
+      : `${SYSTEM}\n\nReply with one JSON object only, no other text, matching this JSON schema:\n${JSON.stringify(SCHEMA)}`,
+    store: false,
+  };
+  if (structured) body.response_format = { type: "text", mime_type: "application/json", schema: SCHEMA };
+
+  let res;
+  try {
+    res = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("No connection to Google. Check the internet and try again.");
+  }
+  let json = await res.json().catch(() => null);
+  if (Array.isArray(json)) json = json[0];
+
+  if (!res.ok) {
+    const info = json?.error || {};
+    const badKey =
+      res.status === 401 || res.status === 403 || (info.details || []).some((d) => d.reason === "API_KEY_INVALID");
+    const err = new Error(
+      badKey ? "The Google key was rejected. Check it in Settings." : `Google returned an error (${res.status}): ${info.message || "unknown"}`
+    );
+    err.status = res.status;
+    err.badKey = badKey;
+    throw err;
+  }
+  if (json?.status && json.status !== "completed") {
+    throw new Error(`Google did not finish the analysis (${json.status}). Try again or use a different photo.`);
+  }
+  const blocks = (json?.steps || json?.outputs || []).flatMap((s) => (s.content ? s.content : [s]));
+  const out = blocks.filter((b) => b && typeof b.text === "string" && (!b.type || b.type === "text")).map((b) => b.text).join("");
+  if (!out) throw new Error("Google returned an empty answer. Try again or use a different photo.");
+  return out;
+}
+
+// ---------- Claude (optional, paid) ----------
+
+async function askClaude(model, prompt, imageData) {
+  if (!state.settings.apiKey) throw new Error("Add a Claude API key in Settings, or switch the model to a free Google one.");
 
   let Anthropic;
   try {
@@ -200,24 +316,10 @@ async function analyze({ image, note, previous, correction }) {
   // which is why calling the API straight from the browser is acceptable here.
   const client = new Anthropic({ apiKey: state.settings.apiKey, dangerouslyAllowBrowser: true });
 
-  const text = [];
-  text.push(image ? "Estimate the nutrition of the food in this photo." : "Estimate the nutrition of the meal described below.");
-  if (note) text.push(`The person's note: ${note}`);
-  if (previous) {
-    text.push(`Your earlier estimate was:\n${JSON.stringify(previous)}`);
-    text.push(`The person's correction: ${correction}\nReturn the complete revised estimate.`);
-  }
-
   const content = [];
-  if (image) {
-    content.push({
-      type: "image",
-      source: { type: "base64", media_type: "image/jpeg", data: image.slice(image.indexOf(",") + 1) },
-    });
-  }
-  content.push({ type: "text", text: text.join("\n\n") });
+  if (imageData) content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageData } });
+  content.push({ type: "text", text: prompt });
 
-  const model = state.settings.model;
   const params = {
     model,
     max_tokens: 16000,
@@ -240,7 +342,7 @@ async function analyze({ image, note, previous, correction }) {
           });
   } catch (err) {
     if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
-      throw new Error("The API key was rejected. Check it in Settings.");
+      throw new Error("The Claude key was rejected. Check it in Settings.");
     }
     if (err instanceof Anthropic.RateLimitError) throw new Error("Too many requests just now. Wait a minute and try again.");
     if (err instanceof Anthropic.APIConnectionError) throw new Error("No connection to Claude. Check the internet and try again.");
@@ -250,12 +352,7 @@ async function analyze({ image, note, previous, correction }) {
 
   if (res.stop_reason === "refusal") throw new Error("Claude declined to analyse this. Try a different photo.");
   if (res.stop_reason === "max_tokens") throw new Error("The answer was cut off. Try again.");
-  const out = res.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  try {
-    return JSON.parse(out);
-  } catch {
-    throw new Error("Claude's answer could not be read. Try again.");
-  }
+  return res.content.filter((b) => b.type === "text").map((b) => b.text).join("");
 }
 
 function demoResult() {
@@ -342,9 +439,10 @@ function mealList(key) {
 }
 
 function viewToday() {
-  const needKey = !state.settings.apiKey && !DEMO;
+  const s = state.settings;
+  const needKey = !DEMO && !(isGemini(s.model) ? s.geminiKey : s.apiKey);
   return `
-    ${needKey ? `<p class="note">To analyse photos, add a Claude API key in <button class="link" data-act="goto" data-to="settings">Settings</button>.</p>` : ""}
+    ${needKey ? `<p class="note">One-time setup: add the free Google key in <button class="link" data-act="goto" data-to="settings">Settings</button> to analyse photos.</p>` : ""}
     ${summaryCard(dateKey())}
     <button class="btn primary big" data-act="camera">📷 Photograph a meal</button>
     <div class="row">
@@ -446,12 +544,16 @@ function viewSettings() {
     `<label class="field"><span>${label}</span><input id="${id}" type="number" inputmode="numeric" min="0" value="${val}"></label>`;
   return `
     <section class="card">
-      <h2>Claude API key</h2>
-      <label class="field"><span>Key from console.anthropic.com (starts with sk-ant-)</span>
-        <input id="sKey" type="password" autocomplete="off" value="${esc(s.apiKey)}" placeholder="sk-ant-..."></label>
+      <h2>Photo analysis</h2>
+      <label class="field"><span>Free Google Gemini key</span>
+        <input id="sGemini" type="password" autocomplete="off" value="${esc(s.geminiKey)}" placeholder="Paste the key here"></label>
+      <p class="small muted" style="margin-bottom:12px">Free, set up once: sign in at aistudio.google.com/apikey with a Google account, create a key and paste it here. Google may use photos sent on the free tier to improve its products.</p>
       <label class="field"><span>Model</span>
         <select id="sModel">${MODELS.map(([id, label]) => `<option value="${id}" ${id === s.model ? "selected" : ""}>${label}</option>`).join("")}</select></label>
-      <p class="small muted">The key is stored only on this device and sent only to Anthropic. Each photo is billed to this key.</p>
+      <label class="field"><span>Claude API key (optional, only for the paid models)</span>
+        <input id="sKey" type="password" autocomplete="off" value="${esc(s.apiKey)}" placeholder="sk-ant-..."></label>
+      <p class="small muted" style="margin-bottom:12px">Keys are stored only on this device and sent only to the service they belong to.</p>
+      ${s.geminiKey ? `<button class="btn" data-act="copySetup" style="width:100%">Copy setup link for another phone</button>` : ""}
     </section>
     <section class="card">
       <h2>Daily goals</h2>
@@ -719,6 +821,7 @@ const actions = {
       const v = parseFloat($(id).value);
       return v >= 0 ? v : old;
     };
+    s.geminiKey = $("#sGemini").value.trim();
     s.apiKey = $("#sKey").value.trim();
     s.model = $("#sModel").value;
     s.kcalGoal = n("#sKcal", s.kcalGoal);
@@ -727,11 +830,21 @@ const actions = {
     s.fatGoal = n("#sFat", s.fatGoal);
     s.sugarLimit = n("#sSugar", s.sugarLimit);
     saveState();
+    render();
     toast("Settings saved");
   },
+  copySetup: async () => {
+    const link = `${location.origin}${location.pathname}#setup=${encodeURIComponent(state.settings.geminiKey)}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast("Link copied. Open it once on the other phone. Share it only with family: it contains the key.");
+    } catch {
+      prompt("Copy this link and open it once on the other phone:", link);
+    }
+  },
   export: () => {
-    // The API key is left out so a backup file can be shared safely.
-    const data = { ...state, settings: { ...state.settings, apiKey: "" } };
+    // Keys are left out so a backup file can be shared safely.
+    const data = { ...state, settings: { ...state.settings, apiKey: "", geminiKey: "" } };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
@@ -781,9 +894,10 @@ $("#importFile").addEventListener("change", async (e) => {
     const data = JSON.parse(await file.text());
     if (!Array.isArray(data.meals)) throw new Error("not a PlateLog backup");
     if (!confirm(`Replace the data on this device with the backup (${data.meals.length} meals)?`)) return;
-    const key = state.settings.apiKey;
+    const { apiKey, geminiKey } = state.settings;
     applyState(data);
-    if (!state.settings.apiKey) state.settings.apiKey = key;
+    state.settings.apiKey ||= apiKey;
+    state.settings.geminiKey ||= geminiKey;
     await saveState();
     render();
     toast("Backup restored");
@@ -795,6 +909,17 @@ $("#importFile").addEventListener("change", async (e) => {
 // ---------- start ----------
 
 await loadState();
+// One-time setup link: .../#setup=<key> stores the free key on this phone.
+if (location.hash.startsWith("#setup=")) {
+  const key = decodeURIComponent(location.hash.slice(7)).trim();
+  history.replaceState(null, "", location.pathname + location.search);
+  if (key) {
+    state.settings.geminiKey = key;
+    if (!isGemini(state.settings.model)) state.settings.model = "gemini-4-hydrogen";
+    await saveState();
+    setTimeout(() => toast("Set up. You can photograph a meal now."), 300);
+  }
+}
 render();
 navigator.storage?.persist?.().catch(() => {});
 if ("serviceWorker" in navigator && location.protocol === "https:") {

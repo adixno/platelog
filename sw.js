@@ -1,7 +1,7 @@
 // Offline shell: the app's own files are served from cache and refreshed in the
 // background; the pinned SDK bundle from the CDN is cached once. Calls to the
-// Claude API are never intercepted.
-const CACHE = "platelog-v1";
+// Gemini and Claude APIs are never intercepted.
+const CACHE = "platelog-v2";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "icon.svg", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
