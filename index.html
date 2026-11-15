@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-size="large">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1f7a4d">
+<meta name="theme-color" content="#1a7548">
 <title>PlateLog</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -19,10 +19,22 @@
 <main id="view"></main>
 
 <nav class="tabs" aria-label="Sections">
-  <button data-tab="today" class="on"><span class="ico">◉</span>Today</button>
-  <button data-tab="history"><span class="ico">▤</span>History</button>
-  <button data-tab="weight"><span class="ico">⚖</span>Weight</button>
-  <button data-tab="settings"><span class="ico">⚙</span>Settings</button>
+  <button data-tab="today" class="on">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+    Today
+  </button>
+  <button data-tab="history">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>
+    History
+  </button>
+  <button data-tab="weight">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5l6 6 4-4 7 7"/><path d="M20.5 11.5v5h-5"/></svg>
+    Weight
+  </button>
+  <button data-tab="settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+    Settings
+  </button>
 </nav>
 
 <!-- Full-screen sheet used for analysing and reviewing a meal -->

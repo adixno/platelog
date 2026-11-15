@@ -25,6 +25,7 @@ const state = {
     geminiKey: "", // free Google AI Studio key
     apiKey: "",    // optional paid Claude key
     model: "gemini-4-hydrogen",
+    textSize: "large", // normal | large | xl
     kcalGoal: 2000,
     proteinGoal: 75,
     carbGoal: 250,
@@ -88,6 +89,7 @@ async function saveState() {
 // ---------- helpers ----------
 
 const $ = (sel) => document.querySelector(sel);
+const applyTextSize = () => (document.documentElement.dataset.size = state.settings.textSize || "large");
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const round = (n) => Math.round(Number(n) || 0);
@@ -386,53 +388,62 @@ function render() {
   $("#view").innerHTML = { today: viewToday, history: viewHistory, weight: viewWeight, settings: viewSettings }[tab]();
 }
 
-function bar(label, value, goal, color, isLimit) {
+const ICON = {
+  camera: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5h3l1.5-2.5h7L17 8.5h3a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/></svg>`,
+  plate: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/></svg>`,
+};
+
+// One nutrient on the daily summary. kind "goal" is something to reach, "limit" something to stay under.
+function tile(label, value, goal, color, kind) {
   const pct = goal > 0 ? Math.min(100, (value / goal) * 100) : 0;
-  const over = isLimit && goal > 0 && value > goal;
-  return `<div class="bar">
-    <label><span>${label}</span><span class="num ${over ? "over" : ""}">${round(value)} / ${round(goal)} g${over ? " (over)" : ""}</span></label>
-    <div class="track"><div class="fill" style="width:${pct}%;--c:${over ? "var(--bad)" : color}"></div></div>
+  const diff = goal - value;
+  const over = kind === "limit" && diff < 0;
+  let status;
+  if (kind === "goal") status = diff > 0 ? `${round(diff)} g to go` : "Goal reached";
+  else status = over ? `Over by ${round(-diff)} g` : `${round(diff)} g left`;
+  return `<div class="tile ${over ? "over" : ""}" style="--c:${over ? "var(--bad)" : color}">
+    <span class="tlabel">${label}</span>
+    <b class="tval num">${round(value)}<small> g</small></b>
+    <div class="track"><div class="fill" style="width:${pct}%"></div></div>
+    <span class="tsub">${kind === "goal" ? "Goal" : "Limit"} ${round(goal)} g<span class="tstat">${status}</span></span>
   </div>`;
 }
 
 function summaryCard(key) {
   const s = state.settings;
   const t = dayTotals(key);
+  const count = mealsOn(key).length;
   const left = s.kcalGoal - t.calories;
   const over = left < 0;
   const pct = s.kcalGoal > 0 ? Math.min(100, (t.calories / s.kcalGoal) * 100) : 0;
-  return `<section class="card">
-    <div class="summary">
-      <div class="ring" style="--p:${pct};--c:${over ? "var(--bad)" : "var(--accent)"}">
-        <div><b class="num">${round(t.calories)}</b><span class="small muted">kcal eaten</span></div>
-      </div>
-      <div class="side">
-        <span class="muted">Goal ${round(s.kcalGoal)} kcal</span>
-        <b class="num ${over ? "over" : ""}">${round(Math.abs(left))} kcal ${over ? "over" : "left"}</b>
-        <span class="small muted">Fiber ${round(t.fiber_g)} g</span>
-      </div>
+  return `<section class="card hero">
+    <div class="ring" style="--p:${pct};--c:${over ? "var(--bad)" : "var(--accent)"}">
+      <div><b class="num">${round(t.calories)}</b><span>of ${round(s.kcalGoal)} kcal</span></div>
     </div>
-    <div class="bars">
-      ${bar("Protein", t.protein_g, s.proteinGoal, "var(--protein)")}
-      ${bar("Carbs", t.carbs_g, s.carbGoal, "var(--carbs)", true)}
-      ${bar("of which sugar", t.sugar_g, s.sugarLimit, "var(--carbs)", true)}
-      ${bar("Fat", t.fat_g, s.fatGoal, "var(--fat)", true)}
+    <p class="left ${over ? "over" : "ok"}"><b class="num">${round(Math.abs(left))}</b> kcal ${over ? "over the goal" : "left"}</p>
+    <div class="tiles">
+      ${tile("Protein", t.protein_g, s.proteinGoal, "var(--protein)", "goal")}
+      ${tile("Carbs", t.carbs_g, s.carbGoal, "var(--carbs)", "limit")}
+      ${tile("Sugar", t.sugar_g, s.sugarLimit, "var(--sugar)", "limit")}
+      ${tile("Fat", t.fat_g, s.fatGoal, "var(--fat)", "limit")}
     </div>
+    <p class="fiber muted">Fiber ${round(t.fiber_g)} g · ${count} ${count === 1 ? "meal" : "meals"} logged</p>
   </section>`;
 }
 
 function mealList(key) {
   const meals = mealsOn(key);
-  if (!meals.length) return `<p class="muted">No meals logged.</p>`;
+  if (!meals.length) return `<p class="empty">Nothing logged yet.</p>`;
   return meals
     .map((m) => {
       const t = totals(m.items);
-      const pic = m.thumb ? `<img src="${m.thumb}" alt="">` : `<span class="ph">🍽</span>`;
+      const pic = m.thumb ? `<img src="${m.thumb}" alt="">` : `<span class="ph">${ICON.plate}</span>`;
       return `<button class="meal" data-act="open" data-id="${m.id}">
         ${pic}
         <span class="info"><b>${esc(m.name)}</b>
-          <span class="small muted">${timeOf(m.ts)} · carbs ${round(t.carbs_g)} g · sugar ${round(t.sugar_g)} g</span></span>
-        <span class="kcal num">${round(t.calories)}</span>
+          <span>${timeOf(m.ts)}</span>
+          <span class="num">Protein ${round(t.protein_g)} g · Carbs ${round(t.carbs_g)} g · Fat ${round(t.fat_g)} g</span></span>
+        <span class="kcal num"><b>${round(t.calories)}</b><small>kcal</small></span>
       </button>`;
     })
     .join("");
@@ -443,12 +454,12 @@ function viewToday() {
   const needKey = !DEMO && !(isGemini(s.model) ? s.geminiKey : s.apiKey);
   return `
     ${needKey ? `<p class="note">One-time setup: add the free Google key in <button class="link" data-act="goto" data-to="settings">Settings</button> to analyse photos.</p>` : ""}
-    ${summaryCard(dateKey())}
-    <button class="btn primary big" data-act="camera">📷 Photograph a meal</button>
+    <button class="btn primary big" data-act="camera">${ICON.camera} Photograph a meal</button>
     <div class="row">
-      <button class="btn" data-act="gallery">Choose a photo</button>
-      <button class="btn" data-act="describe">Type it instead</button>
+      <button class="btn" data-act="gallery">From gallery</button>
+      <button class="btn" data-act="describe">Type it in</button>
     </div>
+    ${summaryCard(dateKey())}
     <section class="card"><h2>Meals today</h2>${mealList(dateKey())}</section>`;
 }
 
@@ -473,16 +484,22 @@ function viewHistory() {
         <i style="height:${(vals[i] / max) * 100}%"></i></button>`;
     })
     .join("");
-  const labels = days.map((k) => `<span>${fromKey(k).getDate()}</span>`).join("");
+  const labels = days.map((k) => `<span class="${k === historyDay ? "sel" : ""}">${fromKey(k).getDate()}</span>`).join("");
+  const loggedAll = vals.filter((v) => v > 0);
+  const onGoal = loggedAll.filter((v) => v <= goal).length;
 
   return `
     <section class="card">
       <h2>Last 14 days</h2>
       <div class="chart">${cols}<div class="goal" style="bottom:${(goal / max) * 100}%"></div></div>
       <div class="xlab">${labels}</div>
-      <p class="small muted" style="margin-top:8px">Dashed line is the ${round(goal)} kcal goal. Average over logged days this week: <b class="num">${round(avg)}</b> kcal. Tap a bar to see that day.</p>
+      <div class="stats">
+        <div><span>Average, last 7 days</span><b class="num">${round(avg)} kcal</b></div>
+        <div><span>Days within goal</span><b class="num">${onGoal} of ${loggedAll.length}</b></div>
+      </div>
+      <p class="small muted" style="margin-top:.7rem">The dashed line is the ${round(goal)} kcal goal. Tap a bar to see that day.</p>
     </section>
-    <h2 style="font-size:19px">${niceDate(historyDay)}</h2>
+    <h2 class="daytitle">${niceDate(historyDay)}</h2>
     ${summaryCard(historyDay)}
     <section class="card"><h2>Meals</h2>${mealList(historyDay)}</section>`;
 }
@@ -532,7 +549,7 @@ function viewWeight() {
     </section>
     <section class="card">
       <h2>Trend</h2>
-      ${latest ? `<p style="margin-bottom:8px"><b class="num">${latest.kg.toFixed(1)} kg</b> <span class="muted">${list.length > 1 ? `(${change >= 0 ? "+" : "−"}${Math.abs(change).toFixed(1)} kg since ${niceDate(list[0].date)})` : ""}</span></p>` : ""}
+      ${latest ? `<p style="margin-bottom:.6rem"><span class="bigstat num">${latest.kg.toFixed(1)} kg</span><br><span class="muted">${list.length > 1 ? `(${change >= 0 ? "+" : "−"}${Math.abs(change).toFixed(1)} kg since ${niceDate(list[0].date)})` : ""}</span></p>` : ""}
       ${weightChart(list)}
     </section>
     ${rows ? `<section class="card"><h2>Entries</h2>${rows}</section>` : ""}`;
@@ -568,6 +585,13 @@ function viewSettings() {
       <button class="btn primary" data-act="saveSettings" style="width:100%">Save goals</button>
     </section>
     <section class="card">
+      <h2>Display</h2>
+      <label class="field"><span>Text size</span>
+        <select id="sText">${[["normal", "Normal"], ["large", "Large"], ["xl", "Extra large"]]
+          .map(([id, label]) => `<option value="${id}" ${id === s.textSize ? "selected" : ""}>${label}</option>`)
+          .join("")}</select></label>
+    </section>
+    <section class="card">
       <h2>Getting accurate numbers</h2>
       <p class="small">Photograph from above with the whole plate in frame, in good light, with a spoon or fork next to it for scale. Add a note for anything the camera cannot see (oil, ghee, sugar, what is inside). Always check the portion weights on the review screen: a photo alone is usually within 20 to 30 percent, and a corrected portion is much closer. A kitchen scale makes it exact.</p>
     </section>
@@ -594,6 +618,22 @@ function closeSheet() {
   $("#sheet").innerHTML = "";
 }
 
+const nutGrid = (n) => `<div class="nut">
+    <div><span>Protein</span><b class="num">${round(n.protein_g)} g</b></div>
+    <div><span>Carbs</span><b class="num">${round(n.carbs_g)} g</b></div>
+    <div><span>Fat</span><b class="num">${round(n.fat_g)} g</b></div>
+    <div><span>Sugar</span><b class="num">${round(n.sugar_g)} g</b></div>
+    <div><span>Fiber</span><b class="num">${round(n.fiber_g)} g</b></div>
+    <div><span>Weight</span><b class="num">${round(n.grams)} g</b></div>
+  </div>`;
+
+// The portion wording ("1 cup") only holds while the weight is the original estimate.
+const portionText = (it) => {
+  const portion = it.portion && (!it.base || round(it.grams) === round(it.base.grams)) ? `${it.portion} · ` : "";
+  return `${portion}likely ${round(it.calories_low)} to ${round(it.calories_high)} kcal`;
+};
+const macroLine = (it) => nutGrid(it);
+
 function itemRow(it, i) {
   return `<div class="item">
     <div class="line1">
@@ -606,21 +646,20 @@ function itemRow(it, i) {
       <button class="chip" data-act="scale" data-i="${i}" data-k="0.5">½</button>
       <button class="chip" data-act="scale" data-i="${i}" data-k="1.5">1½</button>
       <button class="chip" data-act="scale" data-i="${i}" data-k="2">×2</button>
-      <span class="kc num" data-kc="${i}">${round(it.calories)} kcal</span>
     </div>
-    <span class="small muted" data-mac="${i}">${macroLine(it)}</span>
+    <div class="foot">
+      <span class="portion" data-por="${i}">${esc(portionText(it))}</span>
+      <b class="kc num" data-kc="${i}">${round(it.calories)} kcal</b>
+    </div>
+    <div data-mac="${i}">${macroLine(it)}</div>
   </div>`;
 }
-// The portion wording ("1 cup") only holds while the weight is the original estimate.
-const macroLine = (it) => {
-  const portion = it.portion && (!it.base || round(it.grams) === round(it.base.grams)) ? it.portion : "";
-  return `${esc(portion)}${portion ? " · " : ""}P ${round(it.protein_g)} g · C ${round(it.carbs_g)} g (sugar ${round(it.sugar_g)} g) · F ${round(it.fat_g)} g`;
-};
 
 function totalBlock() {
   const t = totals(draft.items);
   return `<div class="total"><span>Total</span><b class="num">${round(t.calories)} kcal</b></div>
-    <p class="small muted">Likely range ${round(t.calories_low)} to ${round(t.calories_high)} kcal · protein ${round(t.protein_g)} g · carbs ${round(t.carbs_g)} g · sugar ${round(t.sugar_g)} g · fat ${round(t.fat_g)} g</p>`;
+    <p class="range">Likely between ${round(t.calories_low)} and ${round(t.calories_high)} kcal</p>
+    ${nutGrid({ ...t, grams: draft.items.reduce((sum, it) => sum + (Number(it.grams) || 0), 0) })}`;
 }
 
 function renderSheet() {
@@ -652,7 +691,8 @@ function renderSheet() {
         ${d.notes ? `<p class="small muted" style="margin-top:8px">${esc(d.notes)}</p>` : ""}
       </section>
       <section class="card">
-        <h2>Items: fix the weights if they look wrong</h2>
+        <h2>What is on the plate</h2>
+        <p class="small muted" style="margin:-.4rem 0 .9rem">Change a weight if it looks wrong and the numbers update.</p>
         <div id="items">${d.items.map(itemRow).join("") || `<p class="muted">No items.</p>`}</div>
       </section>
       <section class="card" id="totalBlock">${totalBlock()}</section>
@@ -720,6 +760,7 @@ function refreshItem(i) {
   const it = draft.items[i];
   $(`[data-kc="${i}"]`).textContent = `${round(it.calories)} kcal`;
   $(`[data-mac="${i}"]`).innerHTML = macroLine(it);
+  $(`[data-por="${i}"]`).textContent = portionText(it);
   $("#totalBlock").innerHTML = totalBlock();
 }
 
@@ -899,6 +940,12 @@ document.addEventListener("input", (e) => {
     keyCheckTimer = setTimeout(checkGeminiKey, 700);
     return;
   }
+  if (el.id === "sText") {
+    state.settings.textSize = el.value;
+    applyTextSize();
+    saveState();
+    return;
+  }
   if (el.id === "sKey" || el.id === "sModel") {
     if (el.id === "sKey") state.settings.apiKey = el.value.trim();
     else state.settings.model = el.value;
@@ -946,6 +993,7 @@ $("#importFile").addEventListener("change", async (e) => {
 // ---------- start ----------
 
 await loadState();
+applyTextSize();
 // One-time setup link: .../#setup=<key> stores the free key on this phone.
 if (location.hash.startsWith("#setup=")) {
   const key = decodeURIComponent(location.hash.slice(7)).trim();
